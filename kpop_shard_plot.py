@@ -41,6 +41,30 @@ def compute_sov(long_df: pd.DataFrame) -> pd.DataFrame:
     x["value"] = (x["mentions"] / x["total"]).fillna(0) * 100.0
     return x[["date", "brand", "value"]]
 
+# --- SoV over a window (ratio of sums) ---
+def compute_window_sov(df_window: pd.DataFrame, brands_to_show: List[str]) -> pd.DataFrame:
+    """
+    df_window: wide frame with columns: date + brand columns (counts)
+    Returns per-brand SoV over the window in percent:
+        100 * sum(brand_mentions) / sum(total_mentions_all_brands)
+    Only returns rows for brands_to_show.
+    """
+    if df_window.empty:
+        return pd.DataFrame({"brand": [], "value": []})
+    # Total across all brands per date
+    totals_by_date = df_window.drop(columns=["date"]).sum(axis=1).rename("total")
+    totals_df = pd.DataFrame({"date": df_window["date"], "total": totals_by_date})
+    # Melt selected brands
+    brands = [b for b in brands_to_show if b in df_window.columns]
+    if not brands:
+        return pd.DataFrame({"brand": [], "value": []})
+    m = df_window[["date"] + brands].melt("date", var_name="brand", value_name="mentions")
+    m = m.merge(totals_df, on="date", how="left")
+    # Ratio of sums across the window
+    sums = m.groupby("brand", as_index=False).agg({"mentions": "sum", "total": "sum"})
+    sums["value"] = (sums["mentions"] / sums["total"]).fillna(0) * 100.0
+    return sums[["brand", "value"]]
+
 
 DATA_CANDIDATES = [
     Path(__file__).parent.parent / "data"
@@ -225,12 +249,18 @@ st.plotly_chart(fig, use_container_width=True)
 
 # Summary table
 st.subheader("Summary (current window)")
-summary = (
-    long_metric.groupby("brand", as_index=False)["value"].sum()
-              .sort_values("value", ascending=False)
-)
-summary_col = "Mentions" if norm_mode == "Raw counts" else "SoV (sum % over window)"
-summary = summary.rename(columns={"value": summary_col})
+if norm_mode == "Raw counts":
+    summary = (
+        long_metric.groupby("brand", as_index=False)["value"].sum()
+                  .sort_values("value", ascending=False)
+                  .rename(columns={"value": "Mentions"})
+    )
+else:
+    # True SoV over the window: ratio of sums across all brands
+    sov_window = compute_window_sov(df_win, selected)
+    summary = sov_window.sort_values("value", ascending=False).rename(columns={"value": "SoV over window (%)"})
+    summary["SoV over window (%)"] = summary["SoV over window (%)"].round(2)
+
 st.dataframe(summary, use_container_width=True)
 
 # Top 10 brands (entire dataset)
@@ -241,18 +271,23 @@ if norm_mode == "Raw counts":
     top10_all.columns = ["brand", "value"]
     y_top = "Total mentions"
 else:
-    # Compute SoV over the full dataset
-    long_all_full = to_long(df, [c for c in df.columns if c != "date"])  # daily SoV
-    sov_full = compute_sov(long_all_full)
-    top10_all = (sov_full.groupby("brand", as_index=False)["value"].mean()
-                         .sort_values("value", ascending=False)
-                         .head(10))
-    y_top = "Avg SoV (%)"
+    # SoV over the full dataset: ratio of sums across all brands
+    full_counts = df.copy()
+    totals_by_date_full = full_counts.drop(columns=["date"]).sum(axis=1).rename("total")
+    totals_df_full = pd.DataFrame({"date": full_counts["date"], "total": totals_by_date_full})
+    long_full = full_counts.melt("date", var_name="brand", value_name="mentions")
+    long_full = long_full.merge(totals_df_full, on="date", how="left")
+    sums_full = long_full.groupby("brand", as_index=False).agg({"mentions": "sum", "total": "sum"})
+    sums_full["value"] = (sums_full["mentions"] / sums_full["total"]).fillna(0) * 100.0
+    top10_all = sums_full.sort_values("value", ascending=False).head(10)
+    y_top = "SoV over dataset (%)"
 
 fig_top10 = px.bar(
     top10_all, x="brand", y="value",
     title=f"Top 10 brands — {y_top}", labels={"value": y_top, "brand": "Brand"}
 )
+if norm_mode != "Raw counts":
+    top10_all["value"] = top10_all["value"].round(2)
 st.plotly_chart(fig_top10, use_container_width=True)
 st.dataframe(top10_all, use_container_width=True)
 

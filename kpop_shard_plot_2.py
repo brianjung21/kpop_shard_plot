@@ -28,8 +28,8 @@ import plotly.express as px
 DATA_CANDIDATES = [
     Path(__file__).parent.parent / "data"
 ]
-PIVOT_FILE = "kpop_alias_pivoted_brand_counts.csv"
-RAW_MATCHES = "reddit_matches_raw.csv"
+PIVOT_FILE = "kpop_alias_pivoted_brand_counts_combined.csv"
+RAW_MATCHES = "reddit_matches_raw_combined.csv"
 SENTIMENT_CACHE = "sentiment_cache.csv"  # optional (see notes below)
 
 DEFAULT_TOPN = 5

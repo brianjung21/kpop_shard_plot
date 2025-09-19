@@ -21,6 +21,8 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # -----------------------------
 # Config & file discovery
@@ -31,6 +33,32 @@ DATA_CANDIDATES = [
 PIVOT_FILE = "kpop_alias_pivoted_brand_counts_combined.csv"
 RAW_MATCHES = "reddit_matches_raw_combined.csv"
 SENTIMENT_CACHE = "sentiment_cache.csv"  # optional (see notes below)
+
+# ETF CSV file (for overlay)
+ETF_FILE = "tiger_media_contents_prices.csv"  # located in the same data folder
+@st.cache_data(show_spinner=False)
+def load_etf_or_none() -> Optional[pd.DataFrame]:
+    try:
+        p = find_file(ETF_FILE)
+    except FileNotFoundError:
+        return None
+    try:
+        etf = pd.read_csv(p)
+    except Exception:
+        return None
+    cols = {c.lower(): c for c in etf.columns}
+    if "date" not in cols:
+        return None
+    etf = etf.rename(columns={cols["date"]: "date"})
+    if "close" in cols:
+        etf = etf.rename(columns={cols["close"]: "close"})
+    if "volume" in cols:
+        etf = etf.rename(columns={cols["volume"]: "volume"})
+    etf["date"] = pd.to_datetime(etf["date"], errors="coerce")
+    for c in ("close","volume"):
+        if c in etf.columns:
+            etf[c] = pd.to_numeric(etf[c], errors="coerce")
+    return etf.dropna(subset=["date"]).reset_index(drop=True)
 
 DEFAULT_TOPN = 5
 
@@ -204,6 +232,15 @@ with st.sidebar:
     mask = (df_freq["date"].dt.date >= start_date) & (df_freq["date"].dt.date <= end_date)
     df_win = df_freq.loc[mask].copy()
 
+    # ETF overlay toggle (plaster the line regardless of scale)
+    etf_overlay_opt = st.selectbox(
+        "ETF overlay",
+        ["None", "Close price", "Volume"],
+        index=0,
+        help="Overlay TIGER Media Contents ETF (from data folder) on the first chart."
+    )
+    etf_df = load_etf_or_none()
+
     defaults = default_top_brands(df_win, DEFAULT_TOPN)
     selected = st.multiselect("Brands", options=all_brands, default=defaults)
 
@@ -265,7 +302,61 @@ else:
     )
 
 fig_main.update_layout(hovermode="x unified", legend_title_text="Brand")
-st.plotly_chart(fig_main, use_container_width=True)
+
+# --- ETF overlay handling (secondary y) ---
+def _overlay_etf(fig_px: go.Figure, freq: str) -> go.Figure:
+    if etf_overlay_opt == "None" or etf_df is None or etf_df.empty:
+        return fig_px
+    # Build a new figure with secondary axis and copy existing traces
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    for tr in fig_px.data:
+        fig.add_trace(tr, secondary_y=False)
+    # Determine window based on what is plotted
+    try:
+        xmins = [pd.to_datetime(tr.x).min() for tr in fig_px.data if hasattr(tr, "x") and len(tr.x)]
+        xmaxs = [pd.to_datetime(tr.x).max() for tr in fig_px.data if hasattr(tr, "x") and len(tr.x)]
+        xmin = min(xmins) if xmins else None
+        xmax = max(xmaxs) if xmaxs else None
+    except Exception:
+        xmin = df_win["date"].min()
+        xmax = df_win["date"].max()
+
+    e = etf_df.copy()
+    if freq == "W":
+        # resample to weekly: last close, sum volume
+        e = (e.set_index("date")
+               .resample("W")
+               .agg({"close": "last", "volume": "sum"})
+               .reset_index())
+    # slice to window if available
+    if xmin is not None and xmax is not None:
+        e = e[(e["date"] >= pd.to_datetime(xmin)) & (e["date"] <= pd.to_datetime(xmax))]
+    # add chosen series on secondary y
+    if etf_overlay_opt == "Close price" and "close" in e.columns and not e["close"].dropna().empty:
+        fig.add_trace(
+            go.Scatter(x=e["date"], y=e["close"], mode="lines", name="ETF Close", line=dict(dash="dash")),
+            secondary_y=True,
+        )
+        fig.update_yaxes(title_text=y_label, secondary_y=False)
+        fig.update_yaxes(title_text="ETF Close", secondary_y=True)
+    elif etf_overlay_opt == "Volume" and "volume" in e.columns and not e["volume"].dropna().empty:
+        fig.add_trace(
+            go.Scatter(x=e["date"], y=e["volume"], mode="lines", name="ETF Volume", line=dict(dash="dot")),
+            secondary_y=True,
+        )
+        fig.update_yaxes(title_text=y_label, secondary_y=False)
+        fig.update_yaxes(title_text="ETF Volume", secondary_y=True)
+    # keep layout from original (handle Layout object safely)
+    try:
+        layout_dict = fig_px.layout.to_plotly_json()
+        layout_dict = {k: v for k, v in layout_dict.items() if k not in ("_empty",)}
+        fig.update_layout(**layout_dict)
+    except Exception:
+        fig.update_layout(fig_px.layout)
+    return fig
+
+fig_show = _overlay_etf(fig_main, freq)
+st.plotly_chart(fig_show, use_container_width=True)
 
 # Add expander after core plot
 expander_details(
